@@ -1,7 +1,8 @@
 """
-🏆 D-GOL UEFA EUROPEAS 2025 🏆
+🏆 D-GOL UEFA EUROPEAS v2.0 - MODELO AVANZADO ⚡
 Análisis de Champions League, Europa League y Conference League
-Modelo: Dixon-Coles + Factor Local/Visitante
+Modelo: Dixon-Coles + Time Decay + Forma + H2H
+100% GRATIS con Web Scraping optimizado
 """
 
 import streamlit as st
@@ -10,10 +11,12 @@ import numpy as np
 from scipy.stats import poisson
 from scipy.optimize import minimize
 import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
 import warnings
 import plotly.graph_objects as go
 import plotly.express as px
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -22,83 +25,124 @@ warnings.filterwarnings('ignore')
 # ============================================================================
 
 st.set_page_config(
-    page_title="D-GOL UEFA Europeas",
+    page_title="D-GOL UEFA Europeas v2.0",
     page_icon="🏆",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-API_KEY = '15edaff34ce64f30bbad0f0b3685e600'
-MIN_PARTIDOS = 10  # UEFA tiene menos partidos por equipo
+MIN_PARTIDOS = 10
 
-# IDs de competiciones UEFA en football-data.org
 COMPETICIONES_UEFA = {
-    'Champions League': 2001,
-    'Europa League': 2146,
-    'Conference League': 2149
+    'Champions League': 'https://fbref.com/en/comps/8/schedule/Champions-League-Scores-and-Fixtures',
+    'Europa League': 'https://fbref.com/en/comps/19/schedule/Europa-League-Scores-and-Fixtures',
+    'Conference League': 'https://fbref.com/en/comps/882/schedule/Europa-Conference-League-Scores-and-Fixtures'
 }
 
 # ============================================================================
-# FUNCIONES BACKEND
+# FUNCIONES DE WEB SCRAPING OPTIMIZADO
 # ============================================================================
 
-@st.cache_data(ttl=14400)  # Cache por 4 horas
-def cargar_datos_uefa(competicion_id, nombre_comp):
-    """Carga datos de UEFA desde football-data.org API"""
-    headers = {'X-Auth-Token': API_KEY}
-    url = f'https://api.football-data.org/v4/competitions/{competicion_id}/matches?status=FINISHED'
-    
+@st.cache_data(ttl=21600)  # Caché de 6 horas
+def scrape_fbref_matches(url, nombre_comp):
+    """Extrae partidos desde FBref (gratis y rápido con lxml)"""
     try:
-        response = requests.get(url, headers=headers)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
         
-        if response.status_code == 429:
-            st.error("⚠️ Límite de API alcanzado. Espera 1 minuto.")
-            return None
+        with st.spinner(f'🔄 Cargando {nombre_comp}...'):
+            response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code != 200:
-            st.error(f"❌ Error API: {response.status_code}")
+            st.error(f"❌ Error al cargar {nombre_comp}: {response.status_code}")
             return None
         
-        data = response.json()
-        matches = data.get('matches', [])
+        # Usar lxml para parsing más rápido
+        soup = BeautifulSoup(response.content, 'lxml')
+        tabla = soup.find('table', {'id': 'sched_all'})
         
-        if not matches:
-            st.warning(f"⚠️ No hay partidos finalizados en {nombre_comp}")
+        if not tabla:
+            st.warning(f"⚠️ No se encontró tabla en {nombre_comp}")
             return None
         
-        # Convertir a DataFrame
         rows = []
-        for match in matches:
-            if match['status'] == 'FINISHED' and match['score']['fullTime']['home'] is not None:
-                score = match['score']['fullTime']
+        tbody = tabla.find('tbody')
+        
+        if not tbody:
+            return None
+        
+        for tr in tbody.find_all('tr'):
+            if tr.find('th', {'data-stat': 'date'}):
+                continue
+            
+            try:
+                date_td = tr.find('td', {'data-stat': 'date'})
+                home_td = tr.find('td', {'data-stat': 'home_team'})
+                away_td = tr.find('td', {'data-stat': 'away_team'})
+                score_td = tr.find('td', {'data-stat': 'score'})
+                
+                if not all([date_td, home_td, away_td, score_td]):
+                    continue
+                
+                score_text = score_td.get_text(strip=True)
+                
+                # Solo partidos finalizados
+                if '–' in score_text or not score_text:
+                    continue
+                
+                # Limpiar score
+                if '(' in score_text:
+                    score_text = score_text.split('(')[0].strip()
+                
+                parts = score_text.split('–')
+                if len(parts) != 2:
+                    continue
+                
+                home_goals = int(parts[0].strip())
+                away_goals = int(parts[1].strip())
                 
                 # Determinar resultado
-                if score['home'] > score['away']:
+                if home_goals > away_goals:
                     ftr = 'H'
-                elif score['home'] < score['away']:
+                elif home_goals < away_goals:
                     ftr = 'A'
                 else:
                     ftr = 'D'
                 
+                fecha = pd.to_datetime(date_td.get_text(strip=True), format='%Y-%m-%d', errors='coerce')
+                
+                if pd.isna(fecha):
+                    continue
+                
                 rows.append({
-                    'Date': pd.to_datetime(match['utcDate']),
-                    'HomeTeam': match['homeTeam']['name'],
-                    'AwayTeam': match['awayTeam']['name'],
-                    'FTHG': score['home'],
-                    'FTAG': score['away'],
+                    'Date': fecha,
+                    'HomeTeam': home_td.get_text(strip=True),
+                    'AwayTeam': away_td.get_text(strip=True),
+                    'FTHG': home_goals,
+                    'FTAG': away_goals,
                     'FTR': ftr
                 })
+                
+            except Exception:
+                continue
+        
+        if not rows:
+            st.warning(f"⚠️ No se encontraron partidos finalizados en {nombre_comp}")
+            return None
         
         df = pd.DataFrame(rows)
+        df = df.sort_values('Date').reset_index(drop=True)
         
         if len(df) < MIN_PARTIDOS:
-            st.warning(f"⚠️ Pocos partidos en {nombre_comp} ({len(df)}). Necesita al menos {MIN_PARTIDOS}.")
+            st.warning(f"⚠️ Solo {len(df)} partidos en {nombre_comp}. Mínimo: {MIN_PARTIDOS}")
             return None
         
         # Calcular modelo
-        modelo = calcular_modelo_mejorado(df)
+        modelo = calcular_modelo_avanzado(df)
         
         if modelo:
+            st.success(f"✅ {len(df)} partidos cargados correctamente")
             return {
                 'df': df,
                 'modelo': modelo,
@@ -110,11 +154,91 @@ def cargar_datos_uefa(competicion_id, nombre_comp):
         return None
         
     except Exception as e:
-        st.error(f"❌ Error: {e}")
+        st.error(f"❌ Error scraping {nombre_comp}: {e}")
         return None
 
-def calcular_modelo_mejorado(df):
-    """Modelo Dixon-Coles + estadísticas LOCAL/VISITANTE"""
+# ============================================================================
+# FUNCIONES DEL MODELO AVANZADO
+# ============================================================================
+
+def calcular_peso_temporal(fecha, fecha_max, xi=0.003):
+    """Time decay exponencial - partidos recientes pesan más"""
+    dias_diff = (fecha_max - fecha).days
+    peso = np.exp(-xi * dias_diff)
+    return peso
+
+def correccion_dixon_coles(home_goals, away_goals, lambda_h, lambda_a, rho=0.1):
+    """Corrección Dixon-Coles para resultados de bajo puntaje (0-0, 1-0, 0-1, 1-1)"""
+    if home_goals == 0 and away_goals == 0:
+        return 1 - lambda_h * lambda_a * rho
+    elif home_goals == 0 and away_goals == 1:
+        return 1 + lambda_h * rho
+    elif home_goals == 1 and away_goals == 0:
+        return 1 + lambda_a * rho
+    elif home_goals == 1 and away_goals == 1:
+        return 1 - rho
+    else:
+        return 1.0
+
+def calcular_forma_reciente(df, equipo, local=True, ultimos=5):
+    """Calcula forma reciente (últimos 5 partidos)"""
+    if local:
+        partidos = df[df['HomeTeam'] == equipo].tail(ultimos)
+        goles_favor = partidos['FTHG'].mean()
+        goles_contra = partidos['FTAG'].mean()
+        victorias = len(partidos[partidos['FTR'] == 'H'])
+        empates = len(partidos[partidos['FTR'] == 'D'])
+    else:
+        partidos = df[df['AwayTeam'] == equipo].tail(ultimos)
+        goles_favor = partidos['FTAG'].mean()
+        goles_contra = partidos['FTHG'].mean()
+        victorias = len(partidos[partidos['FTR'] == 'A'])
+        empates = len(partidos[partidos['FTR'] == 'D'])
+    
+    if len(partidos) == 0:
+        return 0, 0, 0
+    
+    puntos_promedio = (victorias * 3 + empates) / len(partidos)
+    return puntos_promedio, goles_favor if not np.isnan(goles_favor) else 0, goles_contra if not np.isnan(goles_contra) else 0
+
+def calcular_head_to_head(df, equipo1, equipo2):
+    """Historial directo entre dos equipos"""
+    h2h = df[((df['HomeTeam'] == equipo1) & (df['AwayTeam'] == equipo2)) | 
+             ((df['HomeTeam'] == equipo2) & (df['AwayTeam'] == equipo1))]
+    
+    if len(h2h) == 0:
+        return {'partidos': 0, 'goles_eq1': 0, 'goles_eq2': 0, 'victorias_eq1': 0}
+    
+    goles_eq1 = 0
+    goles_eq2 = 0
+    victorias_eq1 = 0
+    
+    for _, row in h2h.iterrows():
+        if row['HomeTeam'] == equipo1:
+            goles_eq1 += row['FTHG']
+            goles_eq2 += row['FTAG']
+            if row['FTR'] == 'H':
+                victorias_eq1 += 1
+        else:
+            goles_eq1 += row['FTAG']
+            goles_eq2 += row['FTHG']
+            if row['FTR'] == 'A':
+                victorias_eq1 += 1
+    
+    return {
+        'partidos': len(h2h),
+        'goles_eq1': goles_eq1 / len(h2h),
+        'goles_eq2': goles_eq2 / len(h2h),
+        'victorias_eq1': victorias_eq1
+    }
+
+def calcular_modelo_avanzado(df):
+    """
+    Modelo Dixon-Coles MEJORADO con:
+    - Time decay (peso temporal)
+    - Corrección Dixon-Coles
+    - Ajuste por calidad de rival
+    """
     equipos = sorted(set(df['HomeTeam']) | set(df['AwayTeam']))
     n = len(equipos)
     
@@ -122,28 +246,64 @@ def calcular_modelo_mejorado(df):
         return None
     
     eq_idx = {e: i for i, e in enumerate(equipos)}
-    params_iniciales = np.concatenate([[0.3], np.zeros(n), np.zeros(n)])
     
-    def log_likelihood(params):
-        ha, ataque, defensa = params[0], params[1:n+1], params[n+1:]
+    # Calcular pesos temporales
+    fecha_max = df['Date'].max()
+    df['peso'] = df['Date'].apply(lambda x: calcular_peso_temporal(x, fecha_max))
+    
+    # Parámetros iniciales: [ha, rho, ataque1...ataqueN, defensa1...defensaN]
+    params_iniciales = np.concatenate([[0.3, 0.1], np.zeros(n), np.zeros(n)])
+    
+    def log_likelihood_mejorado(params):
+        ha = params[0]
+        rho = params[1]
+        ataque = params[2:n+2]
+        defensa = params[n+2:]
+        
         ll = 0
         for _, row in df.iterrows():
             try:
-                h_idx, a_idx = eq_idx[row['HomeTeam']], eq_idx[row['AwayTeam']]
+                h_idx = eq_idx[row['HomeTeam']]
+                a_idx = eq_idx[row['AwayTeam']]
+                
                 lambda_h = np.exp(ha + ataque[h_idx] + defensa[a_idx])
                 lambda_a = np.exp(ataque[a_idx] + defensa[h_idx])
+                
+                # Probabilidad base de Poisson
                 prob = poisson.pmf(int(row['FTHG']), lambda_h) * poisson.pmf(int(row['FTAG']), lambda_a)
-                ll += np.log(prob + 1e-10)
+                
+                # Aplicar corrección Dixon-Coles
+                tau = correccion_dixon_coles(int(row['FTHG']), int(row['FTAG']), lambda_h, lambda_a, rho)
+                prob_corregida = prob * tau
+                
+                # Aplicar peso temporal
+                peso = row['peso']
+                
+                ll += peso * np.log(prob_corregida + 1e-10)
             except:
                 continue
+        
         return -ll
     
     try:
-        res = minimize(log_likelihood, params_iniciales, method='L-BFGS-B', options={'maxiter': 50})
-        ha, ataque, defensa = res.x[0], res.x[1:n+1], res.x[n+1:]
-        params_df = pd.DataFrame({'Equipo': equipos, 'Ataque': ataque, 'Defensa': defensa})
+        # Optimización con límites para rho (-0.5 a 0.5)
+        bounds = [(None, None), (-0.5, 0.5)] + [(None, None)] * (2 * n)
+        res = minimize(log_likelihood_mejorado, params_iniciales, method='L-BFGS-B', 
+                      bounds=bounds, options={'maxiter': 100})
         
-        # ESTADÍSTICAS SEPARADAS LOCAL/VISITANTE
+        ha = res.x[0]
+        rho = res.x[1]
+        ataque = res.x[2:n+2]
+        defensa = res.x[n+2:]
+        
+        params_df = pd.DataFrame({
+            'Equipo': equipos, 
+            'Ataque': ataque, 
+            'Defensa': defensa,
+            'Fuerza_Total': ataque - defensa
+        })
+        
+        # ESTADÍSTICAS COMPLETAS
         stats = {}
         for equipo in equipos:
             p_local = df[df['HomeTeam'] == equipo]
@@ -153,21 +313,24 @@ def calcular_modelo_mejorado(df):
             total = total_local + total_visit
             
             if total > 0:
-                # RENDIMIENTO LOCAL
+                # Rendimiento local
                 goles_local_casa = p_local['FTHG'].sum()
                 goles_contra_local_casa = p_local['FTAG'].sum()
                 victorias_local = len(p_local[p_local['FTR'] == 'H'])
                 empates_local = len(p_local[p_local['FTR'] == 'D'])
                 derrotas_local = len(p_local[p_local['FTR'] == 'A'])
                 
-                # RENDIMIENTO VISITANTE
+                # Rendimiento visitante
                 goles_visit_fuera = p_visitante['FTAG'].sum()
                 goles_contra_visit_fuera = p_visitante['FTHG'].sum()
                 victorias_visit = len(p_visitante[p_visitante['FTR'] == 'A'])
                 empates_visit = len(p_visitante[p_visitante['FTR'] == 'D'])
                 derrotas_visit = len(p_visitante[p_visitante['FTR'] == 'H'])
                 
-                # CALCULAR ÍNDICES DE RENDIMIENTO
+                # Forma reciente
+                forma_local = calcular_forma_reciente(df, equipo, local=True)
+                forma_visit = calcular_forma_reciente(df, equipo, local=False)
+                
                 ptos_local = (victorias_local * 3 + empates_local) / max(total_local * 3, 1) * 100
                 ptos_visit = (victorias_visit * 3 + empates_visit) / max(total_visit * 3, 1) * 100
                 
@@ -187,21 +350,32 @@ def calcular_modelo_mejorado(df):
                     'empates_visit': empates_visit,
                     'derrotas_visit': derrotas_visit,
                     'ptos_visit_pct': ptos_visit,
-                    'diferencia_goles_local_visit': (goles_local_casa / max(total_local, 1)) - (goles_visit_fuera / max(total_visit, 1)),
-                    'diferencia_ptos_local_visit': ptos_local - ptos_visit,
+                    'forma_local_ptos': forma_local[0],
+                    'forma_local_gf': forma_local[1],
+                    'forma_local_gc': forma_local[2],
+                    'forma_visit_ptos': forma_visit[0],
+                    'forma_visit_gf': forma_visit[1],
+                    'forma_visit_gc': forma_visit[2],
                 }
         
-        return {'params': params_df, 'ha': ha, 'stats': stats}
-    except:
+        return {
+            'params': params_df, 
+            'ha': ha, 
+            'rho': rho,
+            'stats': stats,
+            'df': df
+        }
+    except Exception as e:
+        st.error(f"Error en optimización: {e}")
         return None
 
-def analizar_partido_uefa(datos, equipo_local, equipo_visitante):
-    """Análisis completo de partido UEFA"""
+def analizar_partido_uefa_avanzado(datos, equipo_local, equipo_visitante):
+    """Análisis completo con todas las mejoras del modelo"""
     if not datos or not datos['modelo']:
         return None
     
     df, modelo = datos['df'], datos['modelo']
-    params, ha, stats = modelo['params'], modelo['ha'], modelo['stats']
+    params, ha, rho, stats = modelo['params'], modelo['ha'], modelo['rho'], modelo['stats']
     
     if equipo_local not in params['Equipo'].values or equipo_visitante not in params['Equipo'].values:
         return None
@@ -211,42 +385,67 @@ def analizar_partido_uefa(datos, equipo_local, equipo_visitante):
         deh = params[params['Equipo'] == equipo_local]['Defensa'].values[0]
         ata = params[params['Equipo'] == equipo_visitante]['Ataque'].values[0]
         dea = params[params['Equipo'] == equipo_visitante]['Defensa'].values[0]
+        fuerza_local = params[params['Equipo'] == equipo_local]['Fuerza_Total'].values[0]
+        fuerza_visit = params[params['Equipo'] == equipo_visitante]['Fuerza_Total'].values[0]
     except:
         return None
     
-    # OBTENER ESTADÍSTICAS LOCAL/VISITANTE
+    # Estadísticas
     stats_local = stats.get(equipo_local, {})
     stats_visit = stats.get(equipo_visitante, {})
     
-    # AJUSTAR LAMBDA CON FACTOR LOCAL/VISITANTE
+    # Head to head
+    h2h = calcular_head_to_head(df, equipo_local, equipo_visitante)
+    
+    # Lambda base
     lambda_h_base = np.exp(ha + ath + dea)
     lambda_a_base = np.exp(ata + deh)
     
-    # Factor de ajuste basado en rendimiento local/visitante
-    factor_local_goles = stats_local.get('goles_favor_local', 1.5) / max(stats_local.get('goles_favor_visit', 1.0), 0.5)
-    factor_visit_goles = stats_visit.get('goles_favor_visit', 1.0) / max(stats_visit.get('goles_favor_local', 1.5), 0.5)
+    # AJUSTE POR FORMA RECIENTE (20% de influencia)
+    forma_local_factor = 1 + (stats_local.get('forma_local_ptos', 1.5) - 1.5) * 0.2
+    forma_visit_factor = 1 + (stats_visit.get('forma_visit_ptos', 1.5) - 1.5) * 0.2
     
-    # Aplicar ajuste moderado (15% máximo)
-    ajuste_local = 1 + (factor_local_goles - 1) * 0.15
-    ajuste_visit = 1 + (factor_visit_goles - 1) * 0.15
+    # AJUSTE POR CALIDAD DE RIVAL (10% de influencia)
+    if fuerza_local > fuerza_visit:
+        ajuste_calidad_local = 1.05
+        ajuste_calidad_visit = 0.95
+    elif fuerza_visit > fuerza_local:
+        ajuste_calidad_local = 0.95
+        ajuste_calidad_visit = 1.05
+    else:
+        ajuste_calidad_local = 1.0
+        ajuste_calidad_visit = 1.0
     
-    lambda_h = lambda_h_base * ajuste_local
-    lambda_a = lambda_a_base * ajuste_visit
+    # AJUSTE POR H2H (5% si hay historial)
+    if h2h['partidos'] >= 3:
+        if h2h['victorias_eq1'] > h2h['partidos'] / 2:
+            ajuste_h2h_local = 1.03
+            ajuste_h2h_visit = 0.97
+        else:
+            ajuste_h2h_local = 0.97
+            ajuste_h2h_visit = 1.03
+    else:
+        ajuste_h2h_local = 1.0
+        ajuste_h2h_visit = 1.0
     
-    # Matrices de probabilidades
+    # Aplicar todos los ajustes
+    lambda_h = lambda_h_base * forma_local_factor * ajuste_calidad_local * ajuste_h2h_local
+    lambda_a = lambda_a_base * forma_visit_factor * ajuste_calidad_visit * ajuste_h2h_visit
+    
+    # Matrices con corrección Dixon-Coles
     max_goles = 10
-    matriz = np.array([[poisson.pmf(i, lambda_h) * poisson.pmf(j, lambda_a) 
-                       for j in range(max_goles)] for i in range(max_goles)])
+    matriz = np.zeros((max_goles, max_goles))
     
-    lambda_h_ht, lambda_a_ht = lambda_h * 0.45, lambda_a * 0.45
-    matriz_ht = np.array([[poisson.pmf(i, lambda_h_ht) * poisson.pmf(j, lambda_a_ht) 
-                          for j in range(8)] for i in range(8)])
+    for i in range(max_goles):
+        for j in range(max_goles):
+            prob_base = poisson.pmf(i, lambda_h) * poisson.pmf(j, lambda_a)
+            tau = correccion_dixon_coles(i, j, lambda_h, lambda_a, rho)
+            matriz[i, j] = prob_base * tau
     
-    # Probabilidades básicas
-    prob_over_05_ht = (1 - matriz_ht[0, 0]) * 100
-    prob_over_15_ht = sum(matriz_ht[i, j] for i in range(8) for j in range(8) if i + j > 1.5) * 100
-    prob_btts_si = (1 - (poisson.pmf(0, lambda_h) + poisson.pmf(0, lambda_a) - 
-                         poisson.pmf(0, lambda_h) * poisson.pmf(0, lambda_a))) * 100
+    # Normalizar matriz
+    matriz = matriz / matriz.sum()
+    
+    # Calcular probabilidades
     prob_over_15 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 1.5) * 100
     prob_over_25 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 2.5) * 100
     prob_over_35 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 3.5) * 100
@@ -254,7 +453,10 @@ def analizar_partido_uefa(datos, equipo_local, equipo_visitante):
     prob_empate = np.sum(np.diag(matriz)) * 100
     prob_visitante = np.sum(np.triu(matriz, 1)) * 100
     
-    # GOLES POR EQUIPO
+    prob_btts_si = (1 - (poisson.pmf(0, lambda_h) + poisson.pmf(0, lambda_a) - 
+                         poisson.pmf(0, lambda_h) * poisson.pmf(0, lambda_a))) * 100
+    
+    # Goles por equipo
     prob_local_over_05 = (1 - poisson.pmf(0, lambda_h)) * 100
     prob_local_over_15 = (1 - poisson.cdf(1, lambda_h)) * 100
     prob_local_over_25 = (1 - poisson.cdf(2, lambda_h)) * 100
@@ -263,12 +465,14 @@ def analizar_partido_uefa(datos, equipo_local, equipo_visitante):
     prob_visit_over_15 = (1 - poisson.cdf(1, lambda_a)) * 100
     prob_visit_over_25 = (1 - poisson.cdf(2, lambda_a)) * 100
     
+    # Resultado más probable
+    resultado_mas_probable = np.unravel_index(matriz.argmax(), matriz.shape)
+    prob_resultado_mp = matriz[resultado_mas_probable] * 100
+    
     return {
         'goles_esperados_total': lambda_h + lambda_a,
         'lambda_local': lambda_h,
         'lambda_visitante': lambda_a,
-        'prob_over_05_ht': prob_over_05_ht,
-        'prob_over_15_ht': prob_over_15_ht,
         'prob_btts_si': prob_btts_si,
         'prob_over_15': prob_over_15,
         'prob_over_25': prob_over_25,
@@ -291,9 +495,19 @@ def analizar_partido_uefa(datos, equipo_local, equipo_visitante):
         'prob_12': prob_local + prob_visitante,
         'stats_local': stats_local,
         'stats_visit': stats_visit,
-        'ajuste_aplicado': {
-            'factor_local': ajuste_local,
-            'factor_visit': ajuste_visit
+        'h2h': h2h,
+        'fuerza_local': fuerza_local,
+        'fuerza_visit': fuerza_visit,
+        'resultado_mas_probable': resultado_mas_probable,
+        'prob_resultado_mp': prob_resultado_mp,
+        'rho': rho,
+        'ajustes': {
+            'forma_local': forma_local_factor,
+            'forma_visit': forma_visit_factor,
+            'calidad_local': ajuste_calidad_local,
+            'calidad_visit': ajuste_calidad_visit,
+            'h2h_local': ajuste_h2h_local,
+            'h2h_visit': ajuste_h2h_visit
         }
     }
 
@@ -304,41 +518,23 @@ def analizar_partido_uefa(datos, equipo_local, equipo_visitante):
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    }
-    
+    html, body, [class*="css"] {font-family: 'Inter', sans-serif;}
     .main {background-color: #0e1117;}
-    
     .stButton>button {
-        background-color: #1e3a8a;
-        color: white;
-        font-weight: 600;
-        border-radius: 10px;
-        padding: 12px 24px;
-        font-family: 'Inter', sans-serif;
-        transition: all 0.3s;
-        border: none;
+        background-color: #1e3a8a; color: white; font-weight: 600;
+        border-radius: 10px; padding: 12px 24px; transition: all 0.3s; border: none;
     }
-    
     .stButton>button:hover {
-        background-color: #1e40af;
-        transform: translateY(-2px);
+        background-color: #1e40af; transform: translateY(-2px);
         box-shadow: 0 4px 12px rgba(30, 58, 138, 0.4);
     }
-    
-    h1, h2, h3 {
-        font-family: 'Inter', sans-serif !important;
-        font-weight: 700 !important;
-    }
+    h1, h2, h3 {font-family: 'Inter', sans-serif !important; font-weight: 700 !important;}
 </style>
 """, unsafe_allow_html=True)
 
-# Header
-st.markdown('<h1 style="text-align: center; color: #1e3a8a; font-size: 42px;">🏆 D-GOL UEFA EUROPEAS 2025 🏆</h1>', unsafe_allow_html=True)
-st.markdown("<h3 style='text-align: center; font-weight: 500;'>Champions League • Europa League • Conference League</h3>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #888;'>Modelo Dixon-Coles + Factor Local/Visitante</p>", unsafe_allow_html=True)
+st.markdown('<h1 style="text-align: center; color: #1e3a8a; font-size: 42px;">🏆 D-GOL UEFA EUROPEAS v2.0 🏆</h1>', unsafe_allow_html=True)
+st.markdown("<h3 style='text-align: center; font-weight: 500;'>Dixon-Coles + Time Decay + Forma + H2H</h3>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #888;'>100% Gratis con Web Scraping Optimizado</p>", unsafe_allow_html=True)
 st.markdown("---")
 
 # Sidebar
@@ -352,14 +548,13 @@ with st.sidebar:
     
     competicion = st.selectbox("🏆 Competición:", list(COMPETICIONES_UEFA.keys()))
     
-    with st.spinner(f"Cargando {competicion}..."):
-        datos = cargar_datos_uefa(COMPETICIONES_UEFA[competicion], competicion)
+    datos = scrape_fbref_matches(COMPETICIONES_UEFA[competicion], competicion)
     
     if datos:
         st.success(f"✅ {len(datos['equipos'])} equipos")
         st.info(f"📊 {datos['total_partidos']} partidos analizados")
         st.caption(f"📅 Actualizado: {datos['fecha_actualizacion'].strftime('%d/%m/%Y %H:%M')}")
-        st.caption("♻️ Se actualiza cada 4 horas")
+        st.caption("♻️ Caché: 6 horas")
         
         local = st.selectbox("🏠 Local:", datos['equipos'])
         visitante = st.selectbox("✈️ Visitante:", [e for e in datos['equipos'] if e != local])
@@ -370,69 +565,62 @@ with st.sidebar:
 
 # Main
 if analizar_btn and datos:
-    with st.spinner("🔍 Analizando partido UEFA..."):
-        resultado = analizar_partido_uefa(datos, local, visitante)
+    with st.spinner("🔍 Analizando con modelo avanzado..."):
+        resultado = analizar_partido_uefa_avanzado(datos, local, visitante)
     
     if resultado:
-        # Header partido
         st.markdown(f"## 🏟️ {local} vs {visitante}")
-        st.markdown(f"**Competición:** {competicion}")
+        st.markdown(f"**{competicion}** • Modelo Dixon-Coles v2.0")
+        
+        # Mostrar ajustes
+        ajustes = resultado['ajustes']
+        st.caption(f"⚙️ Ajustes: Forma L:{ajustes['forma_local']:.2f} V:{ajustes['forma_visit']:.2f} | Calidad L:{ajustes['calidad_local']:.2f} V:{ajustes['calidad_visit']:.2f}")
+        
         st.markdown("---")
         
-        # Goles esperados
-        col1, col2, col3 = st.columns([1, 2, 1])
+        # Métricas principales
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("⚽ Goles Total", f"{resultado['goles_esperados_total']:.2f}")
         with col2:
-            st.metric("⚽ GOLES ESPERADOS TOTAL", f"{resultado['goles_esperados_total']:.2f}",
-                     delta=f"🏠 {resultado['lambda_local']:.2f} | ✈️ {resultado['lambda_visitante']:.2f}")
+            st.metric("🏠 Local", f"{resultado['lambda_local']:.2f}")
+        with col3:
+            st.metric("✈️ Visitante", f"{resultado['lambda_visitante']:.2f}")
+        with col4:
+            st.metric("🎯 Resultado Probable", f"{resultado['resultado_mas_probable'][0]}-{resultado['resultado_mas_probable'][1]} ({resultado['prob_resultado_mp']:.1f}%)")
         
         st.markdown("---")
         
-        # TABS
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📊 Probabilidades", 
-            "⚽ Goles por Equipo",
-            "🏠 Local vs ✈️ Visitante",
-            "📈 Gráficos", 
-            "💾 Exportar"
-        ])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Probabilidades", "⚽ Goles", "📈 Análisis Avanzado", "📉 Gráficos", "💾 Exportar"])
         
         with tab1:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("🎯 Resultados Descanso")
-                st.metric("Over 0.5 HT", f"{resultado['prob_over_05_ht']:.1f}%")
-                st.metric("Over 1.5 HT", f"{resultado['prob_over_15_ht']:.1f}%")
+                st.subheader("📊 Resultado 1X2")
+                st.metric("🏠 Local", f"{resultado['prob_local']:.1f}%")
+                st.info(f"Cuota: {resultado['cuota_local']:.2f}")
+                st.metric("⚖️ Empate", f"{resultado['prob_empate']:.1f}%")
+                st.info(f"Cuota: {resultado['cuota_empate']:.2f}")
+                st.metric("✈️ Visitante", f"{resultado['prob_visitante']:.1f}%")
+                st.info(f"Cuota: {resultado['cuota_visitante']:.2f}")
                 
                 st.markdown("---")
-                st.subheader("⚽⚽ BTTS (Ambos Marcan)")
+                st.subheader("⚽⚽ BTTS")
                 st.metric("Sí", f"{resultado['prob_btts_si']:.1f}%")
                 st.metric("No", f"{100 - resultado['prob_btts_si']:.1f}%")
-                
-                st.markdown("---")
-                st.subheader("📈 Over/Under Total")
+            
+            with col2:
+                st.subheader("📈 Over/Under")
                 st.metric("Over 1.5", f"{resultado['prob_over_15']:.1f}%")
                 st.metric("Over 2.5", f"{resultado['prob_over_25']:.1f}%")
                 st.metric("Over 3.5", f"{resultado['prob_over_35']:.1f}%")
-            
-            with col2:
-                st.subheader("📊 Resultado Final 1X2")
-                col_1, col_x, col_2 = st.columns(3)
-                with col_1:
-                    st.metric("🏠 Local", f"{resultado['prob_local']:.1f}%")
-                    st.info(f"Cuota: {resultado['cuota_local']:.2f}")
-                with col_x:
-                    st.metric("⚖️ Empate", f"{resultado['prob_empate']:.1f}%")
-                    st.info(f"Cuota: {resultado['cuota_empate']:.2f}")
-                with col_2:
-                    st.metric("✈️ Visitante", f"{resultado['prob_visitante']:.1f}%")
-                    st.info(f"Cuota: {resultado['cuota_visitante']:.2f}")
                 
                 st.markdown("---")
                 st.subheader("🤝 Doble Oportunidad")
-                st.metric("1X (Local o Empate)", f"{resultado['prob_1x']:.1f}%")
-                st.metric("X2 (Empate o Visitante)", f"{resultado['prob_x2']:.1f}%")
-                st.metric("12 (Local o Visitante)", f"{resultado['prob_12']:.1f}%")
+                st.metric("1X", f"{resultado['prob_1x']:.1f}%")
+                st.metric("X2", f"{resultado['prob_x2']:.1f}%")
+                st.metric("12", f"{resultado['prob_12']:.1f}%")
         
         with tab2:
             st.subheader("⚽ GOLES POR EQUIPO")
@@ -441,54 +629,42 @@ if analizar_btn and datos:
             
             with col1:
                 st.markdown(f"### 🏠 {local}")
-                st.metric(f"Goles esperados", f"{resultado['lambda_local']:.2f}")
-                st.markdown("---")
-                st.metric("Over 0.5 goles", f"{resultado['local_over_05']:.1f}%")
-                st.metric("Over 1.5 goles", f"{resultado['local_over_15']:.1f}%")
-                st.metric("Over 2.5 goles", f"{resultado['local_over_25']:.1f}%")
+                st.metric("Over 0.5", f"{resultado['local_over_05']:.1f}%")
+                st.metric("Over 1.5", f"{resultado['local_over_15']:.1f}%")
+                st.metric("Over 2.5", f"{resultado['local_over_25']:.1f}%")
             
             with col2:
                 st.markdown(f"### ✈️ {visitante}")
-                st.metric(f"Goles esperados", f"{resultado['lambda_visitante']:.2f}")
-                st.markdown("---")
-                st.metric("Over 0.5 goles", f"{resultado['visit_over_05']:.1f}%")
-                st.metric("Over 1.5 goles", f"{resultado['visit_over_15']:.1f}%")
-                st.metric("Over 2.5 goles", f"{resultado['visit_over_25']:.1f}%")
+                st.metric("Over 0.5", f"{resultado['visit_over_05']:.1f}%")
+                st.metric("Over 1.5", f"{resultado['visit_over_15']:.1f}%")
+                st.metric("Over 2.5", f"{resultado['visit_over_25']:.1f}%")
         
         with tab3:
-            st.subheader("🏠 Análisis Local vs ✈️ Visitante")
+            st.subheader("🔬 Análisis Avanzado")
             
             col1, col2 = st.columns(2)
             
             with col1:
-                st.markdown(f"### 🏠 {local} (LOCAL)")
-                stats_l = resultado['stats_local']
-                
-                st.metric("Partidos en casa", stats_l.get('partidos_local', 0))
-                st.metric("Goles a favor (casa)", f"{stats_l.get('goles_favor_local', 0):.2f} por partido")
-                st.metric("Goles en contra (casa)", f"{stats_l.get('goles_contra_local', 0):.2f} por partido")
-                
-                st.markdown("---")
-                st.markdown("**Resultados en casa:**")
-                st.metric("Victorias", stats_l.get('victorias_local', 0))
-                st.metric("Empates", stats_l.get('empates_local', 0))
-                st.metric("Derrotas", stats_l.get('derrotas_local', 0))
-                st.metric("% Puntos obtenidos", f"{stats_l.get('ptos_local_pct', 0):.1f}%")
+                st.markdown(f"### 🏠 {local}")
+                st.metric("Fuerza Total (modelo)", f"{resultado['fuerza_local']:.3f}")
+                st.metric("Forma reciente (puntos)", f"{resultado['stats_local'].get('forma_local_ptos', 0):.2f}/3")
+                st.metric("Forma goles favor", f"{resultado['stats_local'].get('forma_local_gf', 0):.2f}")
+                st.metric("Forma goles contra", f"{resultado['stats_local'].get('forma_local_gc', 0):.2f}")
             
             with col2:
-                st.markdown(f"### ✈️ {visitante} (VISITANTE)")
-                stats_v = resultado['stats_visit']
-                
-                st.metric("Partidos fuera", stats_v.get('partidos_visit', 0))
-                st.metric("Goles a favor (fuera)", f"{stats_v.get('goles_favor_visit', 0):.2f} por partido")
-                st.metric("Goles en contra (fuera)", f"{stats_v.get('goles_contra_visit', 0):.2f} por partido")
-                
-                st.markdown("---")
-                st.markdown("**Resultados fuera:**")
-                st.metric("Victorias", stats_v.get('victorias_visit', 0))
-                st.metric("Empates", stats_v.get('empates_visit', 0))
-                st.metric("Derrotas", stats_v.get('derrotas_visit', 0))
-                st.metric("% Puntos obtenidos", f"{stats_v.get('ptos_visit_pct', 0):.1f}%")
+                st.markdown(f"### ✈️ {visitante}")
+                st.metric("Fuerza Total (modelo)", f"{resultado['fuerza_visit']:.3f}")
+                st.metric("Forma reciente (puntos)", f"{resultado['stats_visit'].get('forma_visit_ptos', 0):.2f}/3")
+                st.metric("Forma goles favor", f"{resultado['stats_visit'].get('forma_visit_gf', 0):.2f}")
+                st.metric("Forma goles contra", f"{resultado['stats_visit'].get('forma_visit_gc', 0):.2f}")
+            
+            st.markdown("---")
+            st.subheader("🤼 Head to Head")
+            h2h = resultado['h2h']
+            if h2h['partidos'] > 0:
+                st.info(f"📊 {h2h['partidos']} partidos | {local}: {h2h['goles_eq1']:.1f} goles/partido | {visitante}: {h2h['goles_eq2']:.1f} goles/partido | Victorias {local}: {h2h['victorias_eq1']}")
+            else:
+                st.warning("⚠️ No hay historial directo")
         
         with tab4:
             st.subheader("📊 Visualizaciones")
@@ -504,8 +680,8 @@ if analizar_btn and datos:
             fig1.update_layout(title='Probabilidades 1X2', yaxis_title='Probabilidad (%)', height=400, showlegend=False)
             st.plotly_chart(fig1, use_container_width=True)
             
-            # Matriz resultados exactos
-            st.subheader("🎯 Matriz de Resultados Exactos (Top 6x6)")
+            # Matriz
+            st.subheader("🎯 Matriz de Resultados Exactos")
             matriz_display = resultado['matriz'][:6, :6] * 100
             fig3 = px.imshow(matriz_display,
                             labels=dict(x="Goles Visitante", y="Goles Local", color="Prob. (%)"),
@@ -517,87 +693,69 @@ if analizar_btn and datos:
             st.plotly_chart(fig3, use_container_width=True)
         
         with tab5:
-            st.subheader("💾 Exportar Análisis")
-            
             reporte = f"""
-D-GOL UEFA EUROPEAS 2025 - ANÁLISIS COMPLETO
+D-GOL UEFA v2.0 - ANÁLISIS COMPLETO
 {"="*75}
 
 Partido: {local} vs {visitante}
 Competición: {competicion}
 Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}
+Modelo: Dixon-Coles v2.0 (Time Decay + Forma + H2H)
 
 {"="*75}
 
-GOLES ESPERADOS:
-- Total: {resultado['goles_esperados_total']:.2f}
-- Local: {resultado['lambda_local']:.2f}
-- Visitante: {resultado['lambda_visitante']:.2f}
+PREDICCIÓN PRINCIPAL:
+- Resultado más probable: {resultado['resultado_mas_probable'][0]}-{resultado['resultado_mas_probable'][1]} ({resultado['prob_resultado_mp']:.1f}%)
+- Goles esperados: {resultado['goles_esperados_total']:.2f} (Local: {resultado['lambda_local']:.2f}, Visit: {resultado['lambda_visitante']:.2f})
 
 1X2:
 - Local: {resultado['prob_local']:.1f}% (Cuota: {resultado['cuota_local']:.2f})
 - Empate: {resultado['prob_empate']:.1f}% (Cuota: {resultado['cuota_empate']:.2f})
 - Visitante: {resultado['prob_visitante']:.1f}% (Cuota: {resultado['cuota_visitante']:.2f})
 
-GOLES POR EQUIPO - {local}:
-- Over 0.5: {resultado['local_over_05']:.1f}%
-- Over 1.5: {resultado['local_over_15']:.1f}%
-- Over 2.5: {resultado['local_over_25']:.1f}%
+OVER/UNDER:
+- Over 1.5: {resultado['prob_over_15']:.1f}%
+- Over 2.5: {resultado['prob_over_25']:.1f}%
+- Over 3.5: {resultado['prob_over_35']:.1f}%
 
-GOLES POR EQUIPO - {visitante}:
-- Over 0.5: {resultado['visit_over_05']:.1f}%
-- Over 1.5: {resultado['visit_over_15']:.1f}%
-- Over 2.5: {resultado['visit_over_25']:.1f}%
+BTTS: {resultado['prob_btts_si']:.1f}%
 
-BTTS:
-- Sí: {resultado['prob_btts_si']:.1f}%
-- No: {100 - resultado['prob_btts_si']:.1f}%
+ANÁLISIS AVANZADO:
+- Fuerza {local}: {resultado['fuerza_local']:.3f}
+- Fuerza {visitante}: {resultado['fuerza_visit']:.3f}
+- Parámetro rho: {resultado['rho']:.3f}
 
 {"="*75}
-Generado por D-GOL UEFA Europeas 2025
-Modelo: Dixon-Coles + Factor Local/Visitante
+Generado por D-GOL UEFA v2.0 - Modelo Avanzado
             """
             
             st.download_button(
-                label="💾 Descargar Análisis Completo (TXT)",
-                data=reporte,
-                file_name=f"dgol_uefa_{local}_vs_{visitante}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                mime="text/plain",
+                "💾 Descargar Análisis",
+                reporte,
+                f"dgol_uefa_v2_{local}_vs_{visitante}.txt",
+                "text/plain",
                 use_container_width=True
             )
         
         # Recomendaciones
         st.markdown("---")
-        st.subheader("💡 Recomendaciones Inteligentes UEFA")
+        st.subheader("💡 Recomendaciones Inteligentes")
         
-        recomendaciones = []
+        if resultado['prob_over_25'] > 70:
+            st.success(f"✅ **Over 2.5 Total** - {resultado['prob_over_25']:.1f}% probabilidad")
         
-        if resultado['prob_over_25'] > 65:
-            recomendaciones.append(("✅ Over 2.5 Total", "Alta probabilidad", "success"))
+        if resultado['prob_btts_si'] > 70:
+            st.success(f"✅ **BTTS Sí** - {resultado['prob_btts_si']:.1f}% probabilidad")
         
-        if resultado['prob_btts_si'] > 65:
-            recomendaciones.append(("✅ BTTS Sí", "Muy probable", "success"))
+        if resultado['prob_resultado_mp'] > 15:
+            st.success(f"✅ **Resultado {resultado['resultado_mas_probable'][0]}-{resultado['resultado_mas_probable'][1]}** - {resultado['prob_resultado_mp']:.1f}%")
         
-        if resultado['local_over_15'] > 65:
-            recomendaciones.append((f"✅ {local} Over 1.5", "Alta probabilidad", "success"))
-        
-        if resultado['visit_over_15'] > 65:
-            recomendaciones.append((f"✅ {visitante} Over 1.5", "Alta probabilidad", "success"))
-        
-        if resultado['prob_local'] > 55 and resultado['stats_local'].get('ptos_local_pct', 0) > 60:
-            recomendaciones.append((f"✅ Victoria {local}", "Fuerte en casa", "success"))
-        
-        if recomendaciones:
-            for rec, desc, tipo in recomendaciones:
-                if tipo == "success":
-                    st.success(f"{rec} - {desc}")
-        else:
-            st.info("ℹ️ No hay recomendaciones con alta confianza para este partido.")
+        if resultado['fuerza_local'] > resultado['fuerza_visit'] + 0.5 and resultado['stats_local'].get('forma_local_ptos', 0) > 2.0:
+            st.success(f"✅ **Victoria {local}** - Más fuerte y en buena forma")
     
     else:
         st.error("❌ No se pudo analizar el partido")
 
-# Footer
 st.markdown("---")
-st.markdown("<p style='text-align: center; color: #666;'>🏆 D-GOL UEFA Europeas 2025 | Modelo Dixon-Coles + ML</p>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #666; font-size: 12px;'>Datos: football-data.org API | Actualización automática cada 4 horas</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #666;'>🏆 D-GOL UEFA v2.0 | Dixon-Coles + ML</p>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #666; font-size: 12px;'>Datos: FBref.com (Web Scraping) | Actualización cada 6 horas</p>", unsafe_allow_html=True)
