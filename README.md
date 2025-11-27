@@ -13,6 +13,7 @@ Herramienta de análisis predictivo para competencias UEFA (Champions League, Eu
 - ✅ Head-to-Head histórico
 - ✅ Factor local/visitante
 - ✅ 100% GRATIS (Web Scraping)
+- ✅ **Headers corregidos para evitar 403**
 
 ## 🚀 Despliegue en Streamlit Cloud
 
@@ -22,19 +23,27 @@ Herramienta de análisis predictivo para competencias UEFA (Champions League, Eu
 4. Archivo principal: `dgol_uefa_v2.py`
 5. ¡Listo!
 
-## 📊 Mejoras del Modelo v2.0
+## 🔧 Fixes v2.1
 
-- **Time Decay**: Partidos recientes pesan más (+15-20% precisión)
-- **Corrección Dixon-Coles**: Mejor predicción de empates (+10-15%)
-- **Forma reciente**: Últimos 5 partidos (+8-12%)
-- **Calidad de rival**: Ajuste por fuerza relativa (+5-8%)
-- **Head-to-Head**: Historia específica (+3-5%)
+- ✅ Headers realistas agregados (evita error 403)
+- ✅ Delays aleatorios entre solicitudes
+- ✅ Session management para cookies
+- ✅ Timeout aumentado a 20 segundos
+- ✅ Mejor manejo de errores
+
+## 📊 Mejoras del Modelo
+
+- Time Decay: Partidos recientes pesan más (+15-20%)
+- Corrección Dixon-Coles: Mejor predicción de empates (+10-15%)
+- Forma reciente: Últimos 5 partidos (+8-12%)
+- Calidad de rival: Ajuste por fuerza relativa (+5-8%)
+- Head-to-Head: Historia específica (+3-5%)
 
 **Total: 40-60% más exacto que modelo básico**
 
 ## 📊 Fuente de Datos
 
-Web scraping desde [FBref.com](https://fbref.com) (sitio público de estadísticas)
+Web scraping desde [FBref.com](https://fbref.com) con headers avanzados
 
 ## ⚡ Sistema de Caché
 
