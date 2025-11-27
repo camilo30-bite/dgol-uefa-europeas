@@ -1,6 +1,4 @@
-cache_uefa/
-*.pkl
 __pycache__/
-.streamlit/
 *.pyc
+.streamlit/
 .DS_Store
