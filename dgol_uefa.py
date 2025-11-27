@@ -2,7 +2,7 @@
 🏆 D-GOL UEFA EUROPEAS v2.0 - MODELO AVANZADO ⚡
 Análisis de Champions League, Europa League y Conference League
 Modelo: Dixon-Coles + Time Decay + Forma + H2H
-100% GRATIS con Web Scraping optimizado
+100% GRATIS con Web Scraping optimizado (HEADERS CORREGIDOS)
 """
 
 import streamlit as st
@@ -17,6 +17,7 @@ import warnings
 import plotly.graph_objects as go
 import plotly.express as px
 import time
+import random
 
 warnings.filterwarnings('ignore')
 
@@ -40,22 +41,46 @@ COMPETICIONES_UEFA = {
 }
 
 # ============================================================================
-# FUNCIONES DE WEB SCRAPING OPTIMIZADO
+# FUNCIONES DE WEB SCRAPING OPTIMIZADO (CON HEADERS CORREGIDOS)
 # ============================================================================
 
-@st.cache_data(ttl=21600)  # Caché de 6 horas
+@st.cache_data(ttl=21600)
 def scrape_fbref_matches(url, nombre_comp):
-    """Extrae partidos desde FBref (gratis y rápido con lxml)"""
+    """Extrae partidos desde FBref con headers realistas y delays"""
     try:
+        # Headers realistas que imitan navegador real
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'es-ES,es;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+            'Referer': 'https://fbref.com/',
         }
         
+        # Sesión para mantener cookies
+        session = requests.Session()
+        session.headers.update(headers)
+        
+        # Delay aleatorio (1-3 seg) para no sobrecargar
+        delay = random.uniform(1.0, 3.0)
+        time.sleep(delay)
+        
         with st.spinner(f'🔄 Cargando {nombre_comp}...'):
-            response = requests.get(url, headers=headers, timeout=15)
+            response = session.get(url, timeout=20)
+        
+        if response.status_code == 403:
+            st.error(f"❌ Error 403: FBref bloqueó por rate limit. Intenta en 10 minutos o recarga la página.")
+            return None
         
         if response.status_code != 200:
-            st.error(f"❌ Error al cargar {nombre_comp}: {response.status_code}")
+            st.error(f"❌ Error al cargar {nombre_comp}: HTTP {response.status_code}")
             return None
         
         # Usar lxml para parsing más rápido
@@ -154,7 +179,7 @@ def scrape_fbref_matches(url, nombre_comp):
         return None
         
     except Exception as e:
-        st.error(f"❌ Error scraping {nombre_comp}: {e}")
+        st.error(f"❌ Error scraping {nombre_comp}: {str(e)}")
         return None
 
 # ============================================================================
@@ -251,7 +276,7 @@ def calcular_modelo_avanzado(df):
     fecha_max = df['Date'].max()
     df['peso'] = df['Date'].apply(lambda x: calcular_peso_temporal(x, fecha_max))
     
-    # Parámetros iniciales: [ha, rho, ataque1...ataqueN, defensa1...defensaN]
+    # Parámetros iniciales
     params_iniciales = np.concatenate([[0.3, 0.1], np.zeros(n), np.zeros(n)])
     
     def log_likelihood_mejorado(params):
@@ -269,14 +294,10 @@ def calcular_modelo_avanzado(df):
                 lambda_h = np.exp(ha + ataque[h_idx] + defensa[a_idx])
                 lambda_a = np.exp(ataque[a_idx] + defensa[h_idx])
                 
-                # Probabilidad base de Poisson
                 prob = poisson.pmf(int(row['FTHG']), lambda_h) * poisson.pmf(int(row['FTAG']), lambda_a)
-                
-                # Aplicar corrección Dixon-Coles
                 tau = correccion_dixon_coles(int(row['FTHG']), int(row['FTAG']), lambda_h, lambda_a, rho)
                 prob_corregida = prob * tau
                 
-                # Aplicar peso temporal
                 peso = row['peso']
                 
                 ll += peso * np.log(prob_corregida + 1e-10)
@@ -286,7 +307,6 @@ def calcular_modelo_avanzado(df):
         return -ll
     
     try:
-        # Optimización con límites para rho (-0.5 a 0.5)
         bounds = [(None, None), (-0.5, 0.5)] + [(None, None)] * (2 * n)
         res = minimize(log_likelihood_mejorado, params_iniciales, method='L-BFGS-B', 
                       bounds=bounds, options={'maxiter': 100})
@@ -303,7 +323,6 @@ def calcular_modelo_avanzado(df):
             'Fuerza_Total': ataque - defensa
         })
         
-        # ESTADÍSTICAS COMPLETAS
         stats = {}
         for equipo in equipos:
             p_local = df[df['HomeTeam'] == equipo]
@@ -313,21 +332,18 @@ def calcular_modelo_avanzado(df):
             total = total_local + total_visit
             
             if total > 0:
-                # Rendimiento local
                 goles_local_casa = p_local['FTHG'].sum()
                 goles_contra_local_casa = p_local['FTAG'].sum()
                 victorias_local = len(p_local[p_local['FTR'] == 'H'])
                 empates_local = len(p_local[p_local['FTR'] == 'D'])
                 derrotas_local = len(p_local[p_local['FTR'] == 'A'])
                 
-                # Rendimiento visitante
                 goles_visit_fuera = p_visitante['FTAG'].sum()
                 goles_contra_visit_fuera = p_visitante['FTHG'].sum()
                 victorias_visit = len(p_visitante[p_visitante['FTR'] == 'A'])
                 empates_visit = len(p_visitante[p_visitante['FTR'] == 'D'])
                 derrotas_visit = len(p_visitante[p_visitante['FTR'] == 'H'])
                 
-                # Forma reciente
                 forma_local = calcular_forma_reciente(df, equipo, local=True)
                 forma_visit = calcular_forma_reciente(df, equipo, local=False)
                 
@@ -390,22 +406,17 @@ def analizar_partido_uefa_avanzado(datos, equipo_local, equipo_visitante):
     except:
         return None
     
-    # Estadísticas
     stats_local = stats.get(equipo_local, {})
     stats_visit = stats.get(equipo_visitante, {})
     
-    # Head to head
     h2h = calcular_head_to_head(df, equipo_local, equipo_visitante)
     
-    # Lambda base
     lambda_h_base = np.exp(ha + ath + dea)
     lambda_a_base = np.exp(ata + deh)
     
-    # AJUSTE POR FORMA RECIENTE (20% de influencia)
     forma_local_factor = 1 + (stats_local.get('forma_local_ptos', 1.5) - 1.5) * 0.2
     forma_visit_factor = 1 + (stats_visit.get('forma_visit_ptos', 1.5) - 1.5) * 0.2
     
-    # AJUSTE POR CALIDAD DE RIVAL (10% de influencia)
     if fuerza_local > fuerza_visit:
         ajuste_calidad_local = 1.05
         ajuste_calidad_visit = 0.95
@@ -416,7 +427,6 @@ def analizar_partido_uefa_avanzado(datos, equipo_local, equipo_visitante):
         ajuste_calidad_local = 1.0
         ajuste_calidad_visit = 1.0
     
-    # AJUSTE POR H2H (5% si hay historial)
     if h2h['partidos'] >= 3:
         if h2h['victorias_eq1'] > h2h['partidos'] / 2:
             ajuste_h2h_local = 1.03
@@ -428,11 +438,9 @@ def analizar_partido_uefa_avanzado(datos, equipo_local, equipo_visitante):
         ajuste_h2h_local = 1.0
         ajuste_h2h_visit = 1.0
     
-    # Aplicar todos los ajustes
     lambda_h = lambda_h_base * forma_local_factor * ajuste_calidad_local * ajuste_h2h_local
     lambda_a = lambda_a_base * forma_visit_factor * ajuste_calidad_visit * ajuste_h2h_visit
     
-    # Matrices con corrección Dixon-Coles
     max_goles = 10
     matriz = np.zeros((max_goles, max_goles))
     
@@ -442,10 +450,8 @@ def analizar_partido_uefa_avanzado(datos, equipo_local, equipo_visitante):
             tau = correccion_dixon_coles(i, j, lambda_h, lambda_a, rho)
             matriz[i, j] = prob_base * tau
     
-    # Normalizar matriz
     matriz = matriz / matriz.sum()
     
-    # Calcular probabilidades
     prob_over_15 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 1.5) * 100
     prob_over_25 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 2.5) * 100
     prob_over_35 = sum(matriz[i, j] for i in range(max_goles) for j in range(max_goles) if i + j > 3.5) * 100
@@ -456,7 +462,6 @@ def analizar_partido_uefa_avanzado(datos, equipo_local, equipo_visitante):
     prob_btts_si = (1 - (poisson.pmf(0, lambda_h) + poisson.pmf(0, lambda_a) - 
                          poisson.pmf(0, lambda_h) * poisson.pmf(0, lambda_a))) * 100
     
-    # Goles por equipo
     prob_local_over_05 = (1 - poisson.pmf(0, lambda_h)) * 100
     prob_local_over_15 = (1 - poisson.cdf(1, lambda_h)) * 100
     prob_local_over_25 = (1 - poisson.cdf(2, lambda_h)) * 100
@@ -465,7 +470,6 @@ def analizar_partido_uefa_avanzado(datos, equipo_local, equipo_visitante):
     prob_visit_over_15 = (1 - poisson.cdf(1, lambda_a)) * 100
     prob_visit_over_25 = (1 - poisson.cdf(2, lambda_a)) * 100
     
-    # Resultado más probable
     resultado_mas_probable = np.unravel_index(matriz.argmax(), matriz.shape)
     prob_resultado_mp = matriz[resultado_mas_probable] * 100
     
@@ -537,7 +541,6 @@ st.markdown("<h3 style='text-align: center; font-weight: 500;'>Dixon-Coles + Tim
 st.markdown("<p style='text-align: center; color: #888;'>100% Gratis con Web Scraping Optimizado</p>", unsafe_allow_html=True)
 st.markdown("---")
 
-# Sidebar
 with st.sidebar:
     st.title("⚙️ Configuración")
     
@@ -563,7 +566,6 @@ with st.sidebar:
         st.error("❌ No se pudieron cargar datos")
         analizar_btn = False
 
-# Main
 if analizar_btn and datos:
     with st.spinner("🔍 Analizando con modelo avanzado..."):
         resultado = analizar_partido_uefa_avanzado(datos, local, visitante)
@@ -572,13 +574,11 @@ if analizar_btn and datos:
         st.markdown(f"## 🏟️ {local} vs {visitante}")
         st.markdown(f"**{competicion}** • Modelo Dixon-Coles v2.0")
         
-        # Mostrar ajustes
         ajustes = resultado['ajustes']
         st.caption(f"⚙️ Ajustes: Forma L:{ajustes['forma_local']:.2f} V:{ajustes['forma_visit']:.2f} | Calidad L:{ajustes['calidad_local']:.2f} V:{ajustes['calidad_visit']:.2f}")
         
         st.markdown("---")
         
-        # Métricas principales
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("⚽ Goles Total", f"{resultado['goles_esperados_total']:.2f}")
@@ -669,7 +669,6 @@ if analizar_btn and datos:
         with tab4:
             st.subheader("📊 Visualizaciones")
             
-            # Gráfico 1X2
             fig1 = go.Figure(data=[
                 go.Bar(name='Probabilidad', x=['Local', 'Empate', 'Visitante'],
                       y=[resultado['prob_local'], resultado['prob_empate'], resultado['prob_visitante']],
@@ -680,7 +679,6 @@ if analizar_btn and datos:
             fig1.update_layout(title='Probabilidades 1X2', yaxis_title='Probabilidad (%)', height=400, showlegend=False)
             st.plotly_chart(fig1, use_container_width=True)
             
-            # Matriz
             st.subheader("🎯 Matriz de Resultados Exactos")
             matriz_display = resultado['matriz'][:6, :6] * 100
             fig3 = px.imshow(matriz_display,
@@ -737,7 +735,6 @@ Generado por D-GOL UEFA v2.0 - Modelo Avanzado
                 use_container_width=True
             )
         
-        # Recomendaciones
         st.markdown("---")
         st.subheader("💡 Recomendaciones Inteligentes")
         
