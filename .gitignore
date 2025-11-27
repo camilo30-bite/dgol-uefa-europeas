@@ -1,0 +1,6 @@
+cache_uefa/
+*.pkl
+__pycache__/
+.streamlit/
+*.pyc
+.DS_Store
